@@ -46,7 +46,7 @@ class GoToPose():
         self.move_base.send_goal(goal)
 
 	    # Allow TurtleBot up to 60 seconds to complete task
-        success = self.move_base.wait_for_result(rospy.Duration(60)) 
+        success = self.move_base.wait_for_result(rospy.Duration(180)) 
 
         state = self.move_base.get_state()
         result = False
@@ -76,24 +76,18 @@ class QueueServer():
         self.activeRequest = {}
         #api key to authenticate with
         self.x_api_key = apikey
+        self.x_bot_lat = 0.0
+        self.x_bot_long = 0.0
         #Turtlebot status (from one of the states in the diagram)
         self.x_bot_state = 'stationary'
         rospy.loginfo("Starting Connection...")
-        
-    #TODO: get the bot's current latitude position
-    def x_bot_lat(self):
-        return 0.0
-
-    #TODO: get the bot's current longitude position
-    def x_bot_lon(self):
-        return 0.0
 
     #headers for authentication in the request
     def req_headers(self):
         return {
             'X-API-KEY': str(self.x_api_key),
-            'X-BOT-LAT': str(self.x_bot_lat()),
-            'X-BOT-LON': str(self.x_bot_lon()),
+            'X-BOT-LAT': str(self.x_bot_lat),
+            'X-BOT-LON': str(self.x_bot_long),
             'X-BOT-STATE': str(self.x_bot_state)
         }
 
@@ -107,36 +101,37 @@ class QueueServer():
     #update the state of a running request
     def update_request(self):
         self.x_bot_state = 'moving'
-        req = requests.put(url=QUEUE_ENDPOINT + self.activeRequest["id"], headers=self.req_headers(), data={
+        req = requests.put(url=QUEUE_ENDPOINT + str(self.activeRequest["id"]), headers=self.req_headers(), json={
             #update request attributes depending on the current request status
-            'rstatus': 'in_progress'
-        })          
+            'pickup_request': {
+                'rstatus': 'in_progress'
+            }
+        })        
         #check status returned and perform action accordingly
-        self.parse(request(req))
+        self.parse_request(req)
 
     #update the state of a running request
     def complete_request(self):
         self.x_bot_state = 'moving'
-        req = requests.put(url=QUEUE_ENDPOINT + self.activeRequest["id"] + "/completed", headers=self.req_headers())          
+        req = requests.put(url=QUEUE_ENDPOINT + str(self.activeRequest["id"]) + "/completed", headers=self.req_headers())          
         #check status returned and perform action accordingly
-        self.parse(request(req))
+        self.parse_request(req)
 
     #if the robot fails to get to its location, set to the erorr state and resume polling
     def set_as_error(self):
-        self.x_bot_state = 'error'
-        req = requests.put(url=QUEUE_ENDPOINT + self.activeRequest["id"] + "/cancel", headers=self.req_headers())          
+        self.x_bot_state = 'in_error'
+        req = requests.put(url=QUEUE_ENDPOINT + str(self.activeRequest["id"]) + "/cancel", headers=self.req_headers())          
         #check status returned and perform action accordingly
-        self.parse(request(req))
+        self.parse_request(req)
 
     #move
     def perform_request(self):
-        #TODO: figure out how to get the coordinates from GPS from server
-        x = self.activeRequest["x_coordinate"]
-        y = self.activeRequest["y_coordinate"]
+        self.x_bot_lat = float(self.activeRequest["x_coordinate"])
+        self.x_bot_long = float(self.activeRequest["y_coordinate"])
         z = 0
         try:
             # Customize the following values so they are appropriate for your location
-            position = {'x': float(x), 'y' : float(y)}
+            position = {'x': self.x_bot_lat, 'y' : self.x_bot_long}
             quaternion = {'r1' : 0.000, 'r2' : 0.000, 'r3' : 0.000, 'r4' : 1.000}
 
             rospy.loginfo("Go to (%s, %s) pose", position['x'], position['y'])
@@ -152,26 +147,28 @@ class QueueServer():
                 self.set_as_error()
 
             # Sleep to give the last log messages time to be sent
-            rospy.sleep(1)
+            #rospy.sleep(1)
 
         except rospy.ROSInterruptException:
             rospy.loginfo("Ctrl-C caught. Quitting")
 
     #parse the request from JSON to a dictionary
     def parse_request(self, req):
-        if (req.status_code == 200):
+        if (int(req.status_code) == 200):
             #parse the request
             if (req.content == "null" or req.content == "{}"):
                 #nothing to do
                 rospy.loginfo("Nothing to do...")
-                sleep(MAX_POLL_TIME)
+                time.sleep(MAX_POLL_TIME)
+                self.start_polling()
             else:
                 rospy.loginfo("Request received..")
-                req = json.loads(req.content)
+                req = json.loads(req.content.decode("utf-8") )
                 self.activeRequest = req
                 #perform move if not completed
                 if (self.activeRequest["rstatus"] == "completed" or self.activeRequest["rstatus"] == "cancelled"):
-                    #move to stationary and resume polling
+                       #TODO: figure out how to get the coordinates from GPS from server
+     #move to stationary and resume polling
                     rospy.loginfo("Request completed...")
                     self.start_polling()
                 elif (self.activeRequest["rstatus"] == "in_progress"):
@@ -183,7 +180,7 @@ class QueueServer():
                     self.update_request()
         else:
             #an error :0
-            rospy.loginfo("Error reaching server!\nERROR:" + str(req.json()))
+            rospy.loginfo("Error reaching server!")
 
 
 #establish connection to server and start poll and navigating
